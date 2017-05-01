@@ -7,6 +7,6 @@ Wintermute is a neural network API that I've been building. I will upload it to 
 
 CartPole w/ Keras - https://gym.openai.com/evaluations/eval_7ClBZoN3RHSl7SgcaD0w#reproducibility
 
-CartPole w/ Wintermute - In Progress
+CartPole w/ Wintermute - In Progress - https://gym.openai.com/evaluations/eval_gtVkSx1SjydokN7JY5rWg
 
 Go19x19 w/ Keras - In Progress
