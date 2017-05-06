@@ -9,4 +9,6 @@ CartPole w/ Keras - https://gym.openai.com/evaluations/eval_7ClBZoN3RHSl7SgcaD0w
 
 CartPole w/ Wintermute - In Progress - https://gym.openai.com/evaluations/eval_gtVkSx1SjydokN7JY5rWg
 
+CartPole w/ PyTorch - https://gym.openai.com/evaluations/eval_r6PuaACZRNm9p41EG9TiqQ
+
 Go19x19 w/ Keras - In Progress
