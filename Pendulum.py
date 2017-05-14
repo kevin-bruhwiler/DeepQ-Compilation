@@ -2,159 +2,142 @@ import gym
 from gym import wrappers
 import numpy as np
 import matplotlib.pyplot as plt
-import torch
-from torch.autograd import Variable
-import torch.nn as nn
-import torch.nn.functional as F
-import torch.optim as optim
+import tensorflow as tf
 from collections import deque
 from random import sample
-import copy
 import sys
 
 env = gym.make('Pendulum-v0')
 env = wrappers.Monitor(env, '/tmp/pendulum-experiment-1', force=True)
 input_size = env.observation_space.sample().shape[0]
 output_size = env.action_space.sample().shape[0]
-has_cuda = torch.cuda.is_available()
 
-class Actor(nn.Module):
+class Actor():
+    def __init__(self, input_size, output_size):
+        self.y_ = tf.placeholder(dtype=tf.float32)
+        self.x = tf.placeholder(dtype=tf.float32)
+        self.w1, y = self.linear(self.x, input_size, 50)
+        self.h1 = tf.nn.relu(y)
+        self.w2, y = self.linear(self.h1, 50, 50)
+        self.h2 = tf.nn.relu(y)
+        self.w3, y = self.linear(self.h2, 50, output_size)
+        self.y = tf.nn.tanh(y)
+        self.loss = tf.losses.mean_squared_error(self.y_, self.y)
+        self.train = tf.train.AdamOptimizer(1e-4).minimize(self.loss)
+        self.sess = tf.Session()
+        self.sess.run(tf.global_variables_initializer())
+        return
 
-    def __init__(self):
-        super(Actor, self).__init__()
-        self.fc1 = nn.Linear(input_size, 50)
-        self.fc2 = nn.Linear(50, 50)
-        self.fc3 = nn.Linear(50, output_size)
+    def linear(self, x, dim1, dim2):
+        W = tf.Variable(tf.truncated_normal([dim1, dim2], stddev=0.1))
+        b = tf.Variable(tf.constant(1.0), [1,dim2]) 
+        return W, tf.matmul(x+b,W)
 
-    def forward(self, x):
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        x = F.hardtanh(self.fc3(x))
-        return x
+    def get_sess(self):
+        return self.sess
 
-class Critic(nn.Module):
+class Critic():
+    def __init__(self, input_size, output_size):
+        self.a = tf.placeholder(dtype=tf.float32)
+        self.y_ = tf.placeholder(dtype=tf.float32)
+        self.x = tf.placeholder(dtype=tf.float32)
+        self.w1, y = self.linear(self.x, input_size, 50)
+        self.h1 = tf.nn.relu(y)
+        self.w2, y = self.linear(self.h1, 50, 50)
+        self.h2 = tf.nn.relu(y)
+        #add a to final layer
+        self.w3, self.y = self.linear(tf.concat([self.a, self.h2],1), 50+output_size, 1)
+        self.loss = tf.losses.mean_squared_error(self.y_, self.y)
+        self.a_grad = []
+        self.a_grad.append(tf.gradients(self.loss, [self.a])[0])
+        self.train = tf.train.AdamOptimizer(1e-4).minimize(self.loss)
+        self.sess = tf.Session()
+        self.sess.run(tf.global_variables_initializer())
+        return
 
-    def __init__(self):
-        super(Critic, self).__init__()
-        self.a = output_size
-        self.fc1 = nn.Linear(input_size, 50)
-        self.fc2 = nn.Linear(50, 50)
-        self.fc3 = nn.Linear(50 + output_size, 1)
+    def linear(self, x, dim1, dim2):
+        W = tf.Variable(tf.truncated_normal([dim1, dim2], stddev=0.1))
+        b = tf.Variable(tf.constant(1.0), [1,dim2]) 
+        return W, tf.matmul(x+b,W)
 
-    def forward(self, x, a):
-        x = F.relu(self.fc1(x))
-        x= F.relu(self.fc2(x))
-        x = self.fc3(torch.cat((a,x),1))
-        return x
-    
+    def get_sess(self):
+        return self.sess
+
+    def get_a_grad(self):
+        return self.a_grad
+
+def copyNet(curr, other):
+    curr.w1 = tf.Variable(other.w1.initialized_value())
+    curr.w2 = tf.Variable(other.w2.initialized_value())
+    curr.w3 = tf.Variable(other.w3.initialized_value())
+    return
+
+def updateNet(curr, other):
+    tau = 0.001
+    curr.w1 = tf.Variable(tau*curr.w1.initialized_value() + (1-tau)*curr.w1.initialized_value())
+    curr.w2 = tf.Variable(tau*curr.w1.initialized_value() + (1-tau)*curr.w1.initialized_value())
+    curr.w3 = tf.Variable(tau*curr.w1.initialized_value() + (1-tau)*curr.w1.initialized_value())
+    return
+
 def addMem(memory, mem, memory_size):
     if len(memory) >= memory_size:
         memory.popleft()
     memory.append(mem)
     return
 
-def eGreedy(action, e, step, decay, env):
-    e = e + (1 - e) * np.exp(decay * step)
-    if e > np.random.random():
-        if has_cuda:
-            action.data = torch.from_numpy(env.action_space.sample()).float().cuda()
-        else:    
-            action.data = torch.from_numpy(env.action_space.sample()).float()
-    return 
+def noise(action, it):
+    return np.clip(action + np.random.uniform(-1,1)/(1.+it), -1, 1)
     
-def predictAct(actor, x):
-    x = torch.from_numpy(x).float()
-    if has_cuda:
-        x = x.cuda()
-    x = x.view(1, input_size)
-    x = Variable(x)
-    return actor(x)
+def predictAct(actor, sess, x):
+    return sess.run(actor.y, {actor.x:x.reshape((1,x.shape[0]))})[0]
 
-def predictActs(actor, x):
-    x = torch.from_numpy(x).float()
-    if has_cuda:
-        x = x.cuda()
-    x = Variable(x)
-    return actor(x)
+def predictActs(actor, sess, x):
+    return sess.run(actor.y, {actor.x:x})
 
-def critiqueOne(critic, x, a):
-    x = np.atleast_2d(x)
-    #a = a.unsqueeze(0).float()
-    x = torch.from_numpy(x).float()
-    if has_cuda:
-        x = x.cuda()
-        a = a.cuda()
-    x = x.view(1, input_size)
-    x = Variable(x)
-    return critic(x, a)
+def critiqueOne(critic, sess, x, a):
+    return sess.run(critic.y, {critic.x:x.reshape((1,x.shape[0])), critic.a:a.reshape((1,a.shape[0]))})[0]
 
-def critique(critic, x, a):
-    x = np.atleast_2d(x)
-    x = torch.from_numpy(x).float()
-    if has_cuda:
-        x = x.cuda()
-        a = a.cuda()
-    x = Variable(x)
-    return critic(x, a)
+def critique(critic, sess, x, a):
+    return sess.run(critic.y, {critic.x:x, critic.a:a})
     
-def experienceReplay(memory, replay_length, actor, target_actor, critic,
-                     target_critic, discount, loss_func, step):
+def experienceReplay(memory, replay_length, actor, actor_sess,
+                     target_actor, target_actor_sess,critic, critic_sess,
+                     target_critic, target_critic_sess, discount, step):
     if len(memory) < replay_length:
-        return 0, 0
+        batch_size = len(memory)
     else:
         batch_size = replay_length
     batch = sample(memory, batch_size)
-    x_train = np.asarray([mem[0] for mem in batch])
-    acts = [mem[1].float() for mem in batch]
-    acts = torch.stack(acts)
-    zero = Variable(torch.from_numpy(np.zeros(output_size)).float())
-    q_future = [critiqueOne(target_critic, mem[3], predictAct(target_actor, mem[3]))
+    x_train = [mem[0] for mem in batch]
+    acts = [mem[1] for mem in batch]
+    zero = np.asarray([0] * output_size)
+    q_future = [critiqueOne(target_critic, target_critic_sess, mem[3],
+                            predictAct(target_actor, target_actor_sess, mem[3]))
                 if mem[3] != 'T' else zero for mem in batch]
-    q = critique(critic, x_train, acts)
-    q_target = q.data.cpu().clone().numpy()
-    for i in range(len(q_target)):
-        q_target[i] = (batch[i][2] + discount * q_future[i].data.cpu().numpy()[0])
-    if has_cuda:
-        q_target = Variable(torch.from_numpy(q_target).cuda(), volatile=False)
-    else:
-        q_target = Variable(torch.from_numpy(q_target), volatile=False) 
-    critic_optimizer.zero_grad()    
-    loss = loss_func(q, q_target)
-    loss.backward(retain_variables=True)   
-    critic_optimizer.step()
-    actor_optimizer.zero_grad()
-    target_acts = predictActs(actor, x_train)
-    p_loss = critique(target_critic, x_train, target_acts)
-    p_loss = p_loss.mean()
-    p_loss.backward(retain_variables=True)
-    actor_optimizer.step()
-    if step % 2000 == 0:
-        print('---------------Update Target Networks----------------')
-        target_critic = copy.deepcopy(critic)
-        target_actor = copy.deepcopy(actor)
-    return loss.data.cpu().numpy()[0], p_loss.data.cpu().numpy()[0]
+    q_target = []
+    for i in range(len(q_future)):
+        q_target.append(batch[i][2] + discount * q_future[i])
+    _, l = critic_sess.run([critic.train,critic.loss], {critic.a:acts, critic.x:x_train, critic.y_:q_target})
+    a_out = predictActs(actor, actor_sess, x_train)
+    a_grads = target_critic_sess.run(target_critic.a_grad, {target_critic.x:x_train,
+                                                            target_critic.y_:q_target,
+                                                            target_critic.a:a_out})[0]
+    _, pl = actor_sess.run([actor.train,actor.loss], {actor.x:x_train, actor.y_:a_grads})
+    updateNet(target_actor, actor)
+    updateNet(target_critic, critic)
+    return l, pl
 
-def initActor():
-    net = Actor()
-    if has_cuda:
-        net = net.cuda()
-    net.zero_grad()
-    return net
 
-def initCritic():
-    net = Critic()
-    if has_cuda:
-        net = net.cuda()
-    net.zero_grad()
-    return net
-
-actor = initActor()
-target_actor = copy.deepcopy(actor)
-critic = initCritic()
-target_critic = copy.deepcopy(critic)
-loss_func = nn.MSELoss()
-actor_optimizer = optim.Adam(actor.parameters(), lr=0.001)
-critic_optimizer = optim.Adam(critic.parameters(), lr=0.001)
+actor = Actor(input_size, output_size)
+target_actor = Actor(input_size, output_size)
+copyNet(target_actor, actor)
+critic = Critic(input_size, output_size)
+target_critic = Critic(input_size, output_size)
+copyNet(target_critic, critic)
+actor_sess = actor.get_sess()
+critic_sess = critic.get_sess()
+target_actor_sess = target_actor.get_sess()
+target_critic_sess = target_critic.get_sess()
 
 iterations = 500
 memory = deque([])
@@ -177,32 +160,34 @@ for it in range(iterations):
         step += 1
         obs_prev = obs
         #env.render()
-        action = predictAct(actor, obs)[0]
-        eGreedy(action, epsilon, step, decay, env)
-        obs, reward, done, info = env.step(action.data.cpu().numpy())
+        action = predictAct(actor, actor_sess, obs)
+        action = noise(action, it)
+        obs, reward, done, info = env.step(action)
         obs = obs.reshape(3)
         totalReward += reward
         if done:
             mem = (obs_prev, action, reward, 'T')
             addMem(memory, mem, memory_size)
-            loss, p_loss = experienceReplay(memory, replay_length, actor, target_actor,
-                                            critic, target_critic, discount, loss_func, step)
+            loss, p_loss = experienceReplay(memory, replay_length, actor, actor_sess,
+                                            target_actor, target_actor_sess,critic, critic_sess,
+                                            target_critic, target_critic_sess, discount, step)
             sumLoss += loss
             p_sumLoss += p_loss
             x.append(it)
             y.append(totalReward)
-            print 'reward on iteration', it, ': ', totalReward
+            print ('reward on iteration', it, ': ', totalReward)
             totalReward = 0
-            print 'average loss on iteration', it, ': ', sumLoss/(step-curr_step)
+            print ('average loss on iteration', it, ': ', sumLoss/(step-curr_step))
             sumLoss = 0
-            print 'average p_loss on iteration', it, ': ', p_sumLoss/(step-curr_step)
+            print ('average p_loss on iteration', it, ': ', p_sumLoss/(step-curr_step))
             p_sumLoss = 0
-            print '--------------------------------------------------------'
+            print ('--------------------------------------------------------')
             break
         mem = (obs_prev, action, reward, obs)
         addMem(memory, mem, memory_size)
-        loss, p_loss = experienceReplay(memory, replay_length, actor, target_actor,
-                                        critic, target_critic, discount, loss_func, step)
+        loss, p_loss = experienceReplay(memory, replay_length, actor, actor_sess,
+                                        target_actor, target_actor_sess,critic, critic_sess,
+                                        target_critic, target_critic_sess, discount, step)
         sumLoss += loss
         p_sumLoss += p_loss
 plt.plot(x,y)            
